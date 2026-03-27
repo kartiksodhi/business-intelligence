@@ -113,6 +113,26 @@ class EntityResolver:
         core = normalize_aggressive(cleaned)
 
         try:
+            # Stage 0: alias table — trade names / brand names mapped to CIN
+            row = self.db.execute(
+                """
+                SELECT a.cin, m.company_name
+                FROM entity_aliases a
+                JOIN master_entities m ON m.cin = a.cin
+                WHERE a.normalized_alias = %s
+                LIMIT 1
+                """,
+                (normalized,),
+            ).fetchone()
+            if row:
+                return ResolutionResult(
+                    cin=row[0],
+                    confidence=0.99,
+                    method="alias_exact",
+                    candidates=[{"cin": row[0], "company_name": row[1]}],
+                    resolved=True,
+                )
+
             # Stage 1: exact match on light-normalized name (matches DB column)
             row = self.db.execute(
                 """

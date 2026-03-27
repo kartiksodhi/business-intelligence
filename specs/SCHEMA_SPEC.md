@@ -95,6 +95,28 @@ CREATE TRIGGER trg_master_entities_updated_at
 
 
 -- =============================================================================
+-- TABLE: entity_aliases
+-- Trade names, brand names, and alternate spellings that map to a CIN.
+-- Checked as Stage 0 in entity resolution — before any fuzzy matching.
+-- =============================================================================
+
+CREATE TABLE entity_aliases (
+  id               SERIAL        PRIMARY KEY,
+  alias_name       TEXT          NOT NULL,
+  normalized_alias TEXT          NOT NULL,
+  cin              VARCHAR(21)   NOT NULL REFERENCES master_entities (cin),
+  source           VARCHAR(50),
+  created_at       TIMESTAMP     NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX idx_entity_aliases_normalized_cin
+  ON entity_aliases (normalized_alias, cin);
+
+CREATE INDEX idx_entity_aliases_normalized
+  ON entity_aliases (normalized_alias);
+
+
+-- =============================================================================
 -- TABLE: governance_graph
 -- Director-to-company mapping. Every DIN-CIN relationship tracked here.
 -- =============================================================================
