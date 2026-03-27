@@ -237,3 +237,22 @@ class CaptchaSolveRequest(BaseModel):
 class CaptchaSolveResponse(BaseModel):
     status: str
     source_id: str
+
+
+class AlertFeedbackRequest(BaseModel):
+    action: Literal["confirm", "false_positive"]
+    reason: Optional[str] = None
+
+
+class AlertFeedbackResponse(BaseModel):
+    prediction_id: int
+    action: str
+    message: str
+
+
+class RecalibrateResult(BaseModel):
+    sources_adjusted: int
+    thresholds_raised: int
+    thresholds_lowered: int
+    predictions_expired: int
+    summary: str

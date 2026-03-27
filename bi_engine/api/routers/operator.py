@@ -36,7 +36,9 @@ from api.models import (
     HealthComponent,
     HealthComponents,
     LegalCaseItem,
-    RecalibrateResponse,
+    AlertFeedbackRequest,
+    AlertFeedbackResponse,
+    RecalibrateResult,
     ResolveRequest,
     ResolveResponse,
     ScraperHealthItem,
@@ -955,34 +957,176 @@ async def resolve_queue_item(
     )
 
 
-@router.post("/recalibrate", response_model=RecalibrateResponse)
-async def trigger_recalibrate(db: Annotated[asyncpg.Connection, Depends(get_db)]):
-    # TODO Phase 2: insert auth check here
+@router.post("/alerts/{alert_id}/feedback", response_model=AlertFeedbackResponse)
+async def submit_alert_feedback(
+    alert_id: int,
+    body: AlertFeedbackRequest,
+    db: Annotated[asyncpg.Connection, Depends(get_db)],
+):
+    """Mark an alert as confirmed or false_positive. Feeds the recalibration loop."""
+    # Find the prediction row linked to this delivered_alert
     try:
-        await db.execute(
+        row = await db.fetchrow(
             """
-            CREATE TABLE IF NOT EXISTS recalibration_queue (
-                id          SERIAL    PRIMARY KEY,
-                queued_at   TIMESTAMP NOT NULL DEFAULT NOW(),
-                processed   BOOLEAN   NOT NULL DEFAULT FALSE,
-                result_json JSONB
+            SELECT p.id, p.cin, p.severity
+            FROM delivered_alerts da
+            JOIN predictions p ON (
+                p.cin = da.cin
+                AND p.fired_at >= da.delivered_at - INTERVAL '1 hour'
+                AND p.fired_at <= da.delivered_at + INTERVAL '1 hour'
             )
-            """
+            WHERE da.id = $1
+            ORDER BY p.fired_at DESC
+            LIMIT 1
+            """,
+            alert_id,
         )
-        await db.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_recalibration_queue_unprocessed
-                ON recalibration_queue (processed)
-                WHERE processed = FALSE
-            """
-        )
-        await db.execute("INSERT INTO recalibration_queue DEFAULT VALUES")
     except Exception as e:
         raise _db_error(e)
 
-    return RecalibrateResponse(
-        status="started",
-        message="Recalibration job queued. Results in daily digest.",
+    if not row:
+        raise HTTPException(status_code=404, detail="No prediction found for this alert")
+
+    pred_id = row["id"]
+    try:
+        if body.action == "confirm":
+            await db.execute(
+                """
+                UPDATE predictions
+                SET confirmed = TRUE, confirmed_at = NOW()
+                WHERE id = $1
+                """,
+                pred_id,
+            )
+            msg = "Alert confirmed — signal counted as accurate."
+        else:
+            await db.execute(
+                """
+                UPDATE predictions
+                SET false_positive = TRUE,
+                    false_positive_reason = $2,
+                    confirmed = FALSE
+                WHERE id = $1
+                """,
+                pred_id,
+                body.reason,
+            )
+            msg = "Marked false positive — will lower threshold on next recalibration."
+    except Exception as e:
+        raise _db_error(e)
+
+    return AlertFeedbackResponse(prediction_id=pred_id, action=body.action, message=msg)
+
+
+@router.post("/recalibrate", response_model=RecalibrateResult)
+async def trigger_recalibrate(db: Annotated[asyncpg.Connection, Depends(get_db)]):
+    """
+    Runs the recalibration loop immediately:
+    1. Expire predictions older than 30 days with no feedback.
+    2. Per (source, severity): if false_positive_rate > 20% → lower threshold.
+       If false_positive_rate < 5% and sample >= 10 → raise threshold.
+    3. Write adjusted thresholds to source_state.extra_json.
+    """
+    try:
+        # Step 1: expire old unconfirmed predictions
+        expired = await db.fetchval(
+            """
+            WITH expired AS (
+                UPDATE predictions
+                SET expired = TRUE
+                WHERE confirmed IS NULL
+                  AND false_positive IS NULL
+                  AND fired_at < NOW() - INTERVAL '30 days'
+                  AND expired = FALSE
+                RETURNING id
+            )
+            SELECT COUNT(*) FROM expired
+            """
+        )
+
+        # Step 2: compute false_positive rate per (source, severity) via events join
+        rows = await db.fetch(
+            """
+            SELECT
+                e.source,
+                p.severity,
+                COUNT(*)                                            AS total,
+                COUNT(*) FILTER (WHERE p.false_positive = TRUE)    AS fp_count,
+                COUNT(*) FILTER (WHERE p.confirmed = TRUE)         AS confirmed_count
+            FROM predictions p
+            JOIN events e ON (
+                e.cin = p.cin
+                AND e.severity = p.severity
+                AND e.detected_at BETWEEN p.fired_at - INTERVAL '2 hours'
+                                      AND p.fired_at + INTERVAL '2 hours'
+            )
+            WHERE p.fired_at > NOW() - INTERVAL '90 days'
+              AND p.expired = FALSE
+            GROUP BY e.source, p.severity
+            HAVING COUNT(*) >= 5
+            """
+        )
+
+        raised = 0
+        lowered = 0
+        for row in rows:
+            source = row["source"]
+            severity = row["severity"]
+            total = row["total"]
+            fp_rate = row["fp_count"] / total if total else 0
+            confirm_rate = row["confirmed_count"] / total if total else 0
+
+            if fp_rate > 0.20:
+                # Too many false positives → raise the score threshold for this source
+                action = "raise_threshold"
+                lowered += 1
+            elif confirm_rate > 0.95 and total >= 10:
+                # Very accurate → lower threshold so we catch more signals
+                action = "lower_threshold"
+                raised += 1
+            else:
+                continue
+
+            # Write decision into source_state.extra_json
+            await db.execute(
+                """
+                UPDATE source_state
+                SET extra_json = jsonb_set(
+                    COALESCE(extra_json, '{}'::jsonb),
+                    ARRAY['recalibration'],
+                    extra_json->'recalibration' || jsonb_build_object(
+                        $2::text,
+                        jsonb_build_object(
+                            'action', $3::text,
+                            'fp_rate', $4::float,
+                            'sample', $5::int,
+                            'updated_at', NOW()::text
+                        )
+                    )
+                )
+                WHERE source_id = $1
+                """,
+                source,
+                severity,
+                action,
+                float(fp_rate),
+                int(total),
+            )
+
+    except Exception as e:
+        raise _db_error(e)
+
+    sources_adjusted = raised + lowered
+    return RecalibrateResult(
+        sources_adjusted=sources_adjusted,
+        thresholds_raised=raised,
+        thresholds_lowered=lowered,
+        predictions_expired=int(expired or 0),
+        summary=(
+            f"Expired {expired or 0} stale predictions. "
+            f"Adjusted {sources_adjusted} source/severity thresholds "
+            f"({raised} lowered, {lowered} raised)."
+        ),
     )
 
 
