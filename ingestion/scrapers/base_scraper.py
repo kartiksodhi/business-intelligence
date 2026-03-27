@@ -2,11 +2,13 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 
+import psycopg2
 from playwright.async_api import Page, async_playwright
 
 from ingestion.entity_resolver import EntityResolver
@@ -30,12 +32,38 @@ class RawCase:
     raw_data: dict
 
 
+class _SyncDBWrapper:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=()):
+        cursor = self._conn.cursor()
+        cursor.execute(sql, params)
+        return cursor
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+
+def _default_db():
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if not database_url:
+        raise RuntimeError("DATABASE_URL environment variable is required")
+    return _SyncDBWrapper(psycopg2.connect(database_url))
+
+
 class BaseScraper(ABC):
     source_id: str
     cadence_hours: int
 
-    def __init__(self, db_conn):
-        self.db = db_conn
+    def __init__(self, db_conn=None):
+        self.db = db_conn or _default_db()
 
     @abstractmethod
     async def fetch_new_cases(self, since: date) -> List[RawCase]:

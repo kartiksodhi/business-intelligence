@@ -1,15 +1,20 @@
+from __future__ import annotations
+
+import json
+import logging
+import re
 from datetime import date
 from typing import List
 
+import requests
 from playwright.async_api import async_playwright
 
 from .base_scraper import BaseScraper, RawCase
-import logging
-import re
 
 logger = logging.getLogger(__name__)
 
-DRT_URL = "https://drt.gov.in/case-status"
+DRT_URL = "https://drt.gov.in"
+DRT_API_BASE = "https://drt.gov.in/drtapi"
 
 DRT_BENCHES = [
     "Mumbai I",
@@ -37,24 +42,185 @@ DRT_BENCHES = [
     "Cuttack",
 ]
 
+BANK_SEARCH_TERMS = [
+    "STATE BANK OF INDIA",
+    "PUNJAB NATIONAL BANK",
+    "BANK OF BARODA",
+    "CANARA BANK",
+    "UNION BANK OF INDIA",
+    "HDFC BANK",
+    "ICICI BANK",
+    "AXIS BANK",
+]
+
 
 class DRTScraper(BaseScraper):
     source_id = "drt"
     cadence_hours = 24
 
     async def fetch_new_cases(self, since: date) -> List[RawCase]:
-        cases = []
+        await self._ensure_live_route()
+        scheme_rows = self._fetch_schemes()
+        if not scheme_rows:
+            raise RuntimeError("unable to load DRT benches from live portal")
+
+        scheme_map = {row["schemeNameDrtId"]: row["SchemaName"] for row in scheme_rows}
         run_benches = self._benches_for_this_run()
+        matching_scheme_ids = [
+            scheme_id
+            for scheme_id, scheme_name in scheme_map.items()
+            if self._matches_bench_rotation(scheme_name, run_benches)
+        ]
+
+        session = requests.Session()
+        session.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json,text/plain,*/*"})
+        cases: list[RawCase] = []
+        seen_case_keys: set[str] = set()
+
+        for scheme_id in matching_scheme_ids:
+            bench_name = scheme_map[scheme_id]
+            for term in BANK_SEARCH_TERMS:
+                try:
+                    listing = self._search_party_name(session, scheme_id, term)
+                except Exception as exc:
+                    logger.warning("drt: listing failed for bench=%s term=%s: %s", bench_name, term, exc)
+                    continue
+
+                for row in listing:
+                    filing_date = self._parse_date(row.get("dateoffiling") or "")
+                    filing_no = row.get("filingNo")
+                    if not filing_date or filing_date < since or not filing_no:
+                        continue
+                    case_key = f"{scheme_id}:{filing_no}"
+                    if case_key in seen_case_keys:
+                        continue
+
+                    detail = self._fetch_case_detail(session, scheme_id, filing_no)
+                    respondent = self._pick_party_name(detail, row, "respondent")
+                    applicant = self._pick_party_name(detail, row, "petitioner")
+                    if not respondent or not applicant or not self._looks_like_bank(applicant):
+                        continue
+
+                    seen_case_keys.add(case_key)
+                    next_hearing = self._parse_date(detail.get("nextlistingdate") or "")
+                    cases.append(
+                        RawCase(
+                            source="drt",
+                            case_number=self._format_case_number(detail or row),
+                            case_type="DRT",
+                            court=self._format_court_name(bench_name, detail),
+                            filing_date=filing_date,
+                            respondent_name=respondent,
+                            petitioner_name=applicant,
+                            status=detail.get("casestatus") or row.get("casestatus") or "Filed",
+                            amount_involved=self._parse_amount(row.get("amount") or detail.get("amount")),
+                            raw_data={
+                                "scheme_id": scheme_id,
+                                "bench": bench_name,
+                                "case_type": detail.get("casetype") or row.get("casetype"),
+                                "case_no": detail.get("caseno") or row.get("caseno"),
+                                "case_year": detail.get("caseyear") or row.get("caseyear"),
+                                "diary_no": detail.get("diaryno") or row.get("diaryno"),
+                                "applicant": applicant,
+                                "respondent": respondent,
+                                "filing_date": filing_date.isoformat(),
+                                "next_hearing_date": next_hearing.isoformat() if next_hearing else None,
+                                "tribunal_bench": bench_name,
+                                "court_no": detail.get("courtNo"),
+                                "court_name": detail.get("courtName"),
+                                "purpose": detail.get("nextListingPurpose"),
+                                "filing_no": filing_no,
+                            },
+                        )
+                    )
+
+        logger.info("drt: collected %d recent cases from %d benches", len(cases), len(matching_scheme_ids))
+        return cases
+
+    async def _ensure_live_route(self) -> None:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
-            for bench in run_benches:
-                try:
-                    batch = await self._scrape_bench(browser, bench, since)
-                    cases.extend(batch)
-                except Exception as e:
-                    logger.error(f"drt {bench} failed: {e}")
+            page = await browser.new_page()
+            await page.goto(DRT_URL, wait_until="networkidle", timeout=30000)
+            await page.goto(f"{DRT_URL}/#/casedetail", wait_until="networkidle", timeout=30000)
+            if not await page.get_by_text("Case Details", exact=False).count():
+                await browser.close()
+                raise RuntimeError("drt SPA route did not load")
             await browser.close()
-        return cases
+
+    def _fetch_schemes(self) -> list[dict]:
+        response = requests.post(f"{DRT_API_BASE}/getDrtDratScheamName", timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            return []
+        return [
+            row
+            for row in payload
+            if isinstance(row, dict)
+            and str(row.get("schemeNameDrtId") or "").isdigit()
+            and int(str(row.get("schemeNameDrtId"))) < 100
+        ]
+
+    def _matches_bench_rotation(self, scheme_name: str, run_benches: list[str]) -> bool:
+        normalized = scheme_name.lower().replace(" ", "")
+        aliases = {
+            "mumbaii": ("mumbai(drt1)", "mumbai(drt 1)"),
+            "mumbaiii": ("mumbai(drt2)", "mumbai(drt 2)"),
+            "delhi": ("delhi(drt1)", "delhi(drt2)", "delhi(drt3)"),
+            "bengaluru": ("bangalore(drt1)", "bangalore(drt2)", "bengaluru"),
+            "ernakulum": ("ernakulam",),
+            "vishakhapatnam": ("vishakhapatnam", "visakhapatnam"),
+        }
+        for bench in run_benches:
+            bench_key = bench.lower().replace(" ", "")
+            if bench_key in normalized:
+                return True
+            if any(alias in normalized for alias in aliases.get(bench_key, ())):
+                return True
+        return False
+
+    def _search_party_name(self, session: requests.Session, scheme_id: str, party_name: str) -> list[dict]:
+        response = session.post(
+            f"{DRT_API_BASE}/casedetail_party_name_wise",
+            data={"schemeNameDratDrtId": str(scheme_id), "partyName": party_name},
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, list) else []
+
+    def _fetch_case_detail(self, session: requests.Session, scheme_id: str, filing_no: str) -> dict:
+        response = session.post(
+            f"{DRT_API_BASE}/getCaseDetailPartyWise",
+            data={"filingNo": filing_no, "schemeNameDrtId": str(scheme_id)},
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
+    def _pick_party_name(self, detail: dict, listing: dict, role: str) -> str:
+        if role == "petitioner":
+            return (detail.get("petitionerName") or listing.get("applicant") or "").strip()
+        return (detail.get("respondentName") or listing.get("respondent") or "").strip()
+
+    def _looks_like_bank(self, applicant: str) -> bool:
+        lowered = applicant.lower()
+        return any(token in lowered for token in ("bank", "financial", "asset reconstruction", "nbfc", "finance"))
+
+    def _format_case_number(self, row: dict) -> str:
+        case_type = row.get("casetype") or "DRT"
+        case_no = row.get("caseno") or "NA"
+        case_year = row.get("caseyear") or row.get("diaryyear") or "NA"
+        return f"{case_type}/{case_no}/{case_year}"
+
+    def _format_court_name(self, bench_name: str, detail: dict) -> str:
+        court_name = detail.get("courtName")
+        court_no = detail.get("courtNo")
+        if court_name and court_no:
+            return f"{bench_name} - {court_name} {court_no}"
+        return bench_name
 
     def _benches_for_this_run(self) -> List[str]:
         from ingestion.scrapers import _run_counter
@@ -63,82 +229,25 @@ class DRTScraper(BaseScraper):
         _run_counter[self.source_id] = _run_counter.get(self.source_id, 0) + 1
         return DRT_BENCHES[offset : offset + 5]
 
-    async def _scrape_bench(self, browser, bench: str, since: date) -> List[RawCase]:
-        page = await browser.new_page()
-        cases = []
+    def _severity_for_case_type(self, case_type: str) -> str:
+        if case_type == "DRT":
+            return "ALERT"
+        return super()._severity_for_case_type(case_type)
 
-        response = await page.goto(DRT_URL, timeout=30000)
-        if response and response.status >= 400:
-            await page.close()
-            raise RuntimeError(f"drt portal HTTP {response.status} for bench {bench}")
-
-        await page.wait_for_load_state("networkidle")
-
-        # Detect application error pages (200 response with error content)
-        page_text = (await page.inner_text("body")).lower()
-        if any(phrase in page_text for phrase in ("application error", "server error", "503 service", "an error occurred")):
-            await page.close()
-            raise RuntimeError(f"drt portal returned application error page for bench {bench}")
-
-        bench_selector = page.locator("select#drt_bench")
-        if await bench_selector.count() == 0:
-            await page.close()
-            raise RuntimeError(f"drt form selectors not found for bench {bench} — site may be down")
-
-        await page.select_option("select#drt_bench", bench)
-        await page.select_option("select#case_type_code", "OA")
-        await page.fill("input#filing_date_from", since.strftime("%d/%m/%Y"))
-        await page.fill("input#filing_date_to", date.today().strftime("%d/%m/%Y"))
-
-        captcha_visible = await page.locator("img#captchaImage").count() > 0 and await page.is_visible(
-            "img#captchaImage"
-        )
-        if captcha_visible:
-            solved = await self._solve_captcha(page, "img#captchaImage", "input#captchaText")
-            if not solved:
-                await page.close()
-                return []
-
-        await page.click("button[type='submit']")
-        await page.wait_for_load_state("networkidle")
-
-        rows = await page.query_selector_all("table.result-table tbody tr")
-        for row in rows:
-            cells = await row.query_selector_all("td")
-            if len(cells) < 5:
-                continue
-            texts = [await c.inner_text() for c in cells]
-
-            case_number = texts[0].strip()
-            petitioner = texts[1].strip()
-            respondent = texts[2].strip()
-            filing_date = self._parse_date(texts[3].strip())
-            amount_raw = texts[4].strip() if len(texts) > 4 else None
-            status = texts[5].strip() if len(texts) > 5 else "Filed"
-
-            if not filing_date or filing_date < since:
-                continue
-
-            cases.append(
-                RawCase(
-                    source="drt",
-                    case_number=case_number,
-                    case_type="DRT",
-                    court=f"DRT {bench}",
-                    filing_date=filing_date,
-                    respondent_name=respondent,
-                    petitioner_name=petitioner,
-                    status=status,
-                    amount_involved=self._parse_amount(amount_raw),
-                    raw_data={"bench": bench, "cells": texts},
-                )
-            )
-
-        await page.close()
-        return cases
+    def _insert_event(self, case: RawCase, cin: str) -> int:
+        row = self.db.execute(
+            """
+            INSERT INTO events (cin, source, event_type, severity, detected_at, data_json)
+            VALUES (%s, %s, %s, %s, NOW(), %s)
+            RETURNING id
+            """,
+            (cin, case.source, "DRT_CASE_FILED", "ALERT", json.dumps(case.raw_data)),
+        ).fetchone()
+        self.db.commit()
+        return row[0]
 
     def _parse_date(self, raw: str):
-        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y"):
             try:
                 from datetime import datetime
 
@@ -156,4 +265,3 @@ class DRTScraper(BaseScraper):
             return int(float(cr.group(1)) * 10_000_000)
         num = re.search(r"[\d.]+", raw)
         return int(float(num.group())) if num else None
-

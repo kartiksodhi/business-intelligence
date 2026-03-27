@@ -71,18 +71,23 @@ class EPFOScraper(BaseSignalScraper):
             logger.warning("epfo: portal probe failed: %s", exc)
             return []
 
+        self._store_state(
+            self.source_id,
+            {"companies_checked": len(monitored), "emitted_events": len(emitted)},
+            record_count=len(monitored),
+        )
         return emitted
 
     def _load_watchlisted_companies(self) -> list[dict]:
+        epfo_column = "me.epfo_id" if self._table_has_column("master_entities", "epfo_id") else "NULL AS epfo_id"
         try:
             rows = self._fetchall(
-                """
-                SELECT DISTINCT me.cin, me.company_name, me.epfo_id
+                f"""
+                SELECT me.cin, me.company_name, {epfo_column}
                 FROM master_entities me
-                JOIN watchlists w ON w.is_active = TRUE
-                WHERE me.status = 'Active'
-                  AND (w.cin_list IS NULL OR me.cin = ANY(w.cin_list))
-                ORDER BY me.cin
+                WHERE me.health_score < 50 OR me.health_score IS NULL
+                ORDER BY RANDOM()
+                LIMIT 100
                 """,
             )
         except Exception as exc:
@@ -156,6 +161,8 @@ class EPFOScraper(BaseSignalScraper):
         }
 
     def _store_establishment_code(self, cin: str, establishment_code: str) -> None:
+        if not self._table_has_column("master_entities", "epfo_id"):
+            return
         try:
             self._execute(
                 """
@@ -187,12 +194,10 @@ class EPFOScraper(BaseSignalScraper):
 
     def _extract_coverage_status(self, text: str) -> Optional[str]:
         lowered = text.lower()
-        if "cancelled" in lowered:
-            return "Cancelled"
-        if "exempted" in lowered:
-            return "Exempted"
+        if any(token in lowered for token in ("cancelled", "exempted", "inactive", "closed")):
+            return "Inactive"
         if "covered" in lowered or "active" in lowered:
-            return "Covered"
+            return "Active"
         return None
 
     def classify_change(
@@ -204,11 +209,6 @@ class EPFOScraper(BaseSignalScraper):
     ) -> tuple[str | None, str | None]:
         before = (previous_status or "").lower()
         after = (current_status or "").lower()
-        if before and after in {"cancelled", "exempted"} and before != after:
-            return "EPFO_ESTABLISHMENT_DELISTED", "CRITICAL"
-        if previous_count and current_count is not None:
-            if current_count <= previous_count * 0.8:
-                return "EPFO_CONTRIBUTION_DROP", "ALERT"
-            if current_count >= previous_count * 1.2:
-                return "EPFO_HIRING_SURGE", "INFO"
+        if before == "active" and after == "inactive":
+            return "EPFO_COVERAGE_LAPSED", "ALERT"
         return None, None

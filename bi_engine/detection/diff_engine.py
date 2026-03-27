@@ -20,6 +20,32 @@ from .detectors.ecourts import ECourtsDetector
 from .detectors.nclt import NCLTDetector
 from .detectors.ogd import OGDDetector
 from .detectors.sarfaesi import SARFAESIDetector
+from .detectors.phase3 import (
+    IBBIDetector,
+    SEBIEnforcementDetector,
+    SEBIBulkDealsDetector,
+    RBIWilfulDefaulterDetector,
+    RBINBFCDetector,
+    GSTDetector,
+    EPFODetector,
+    MCAChargeDetector,
+    ROCFilingsDetector,
+    HighCourtDetector,
+    SupremeCourtDetector,
+    LabourCourtDetector,
+    CCIDetector,
+    DGFTDetector,
+    RERADetector,
+    MoEFDetector,
+    PollutionControlDetector,
+    CERSAIDetector,
+    StateVATDetector,
+    GenericHiringDetector,
+    UdyamDetector,
+    ESICDetector,
+    GeMDetector,
+    CPPPDetector,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -27,13 +53,46 @@ logger = logging.getLogger(__name__)
 FAILURE_THRESHOLD = 4
 
 DETECTOR_REGISTRY: Dict[str, Type[BaseDetector]] = {
+    # Phase 2 — existing
     "mca_ogd": OGDDetector,
     "nclt": NCLTDetector,
     "drt": DRTDetector,
     "sarfaesi": SARFAESIDetector,
     "ecourts": ECourtsDetector,
     "mca_directors": DirectorDetector,
+    # Phase 3 — legal & financial
+    "ibbi": IBBIDetector,
+    "sebi_enforcement_orders": SEBIEnforcementDetector,
+    "sebi_bulk_block_deals": SEBIBulkDealsDetector,
+    "rbi_wilful_defaulter": RBIWilfulDefaulterDetector,
+    "rbi_nbfc_bank_notifications": RBINBFCDetector,
+    "gst_portal": GSTDetector,
+    "epfo": EPFODetector,
+    "mca_charge_register": MCAChargeDetector,
+    "roc_filings": ROCFilingsDetector,
+    # Phase 3 — courts
+    "high_court_commercial_division": HighCourtDetector,
+    "supreme_court_cause_lists": SupremeCourtDetector,
+    "labour_court_orders": LabourCourtDetector,
+    # Phase 3 — regulatory
+    "cci_filings": CCIDetector,
+    "dgft": DGFTDetector,
+    "rera": RERADetector,
+    "moef_environment_clearance_portal": MoEFDetector,
+    "pollution_control_boards": PollutionControlDetector,
+    "cersai": CERSAIDetector,
+    "state_vat_commercial_tax_portals": StateVATDetector,
+    # Phase 3 — employment signals
+    "udyam_registration_portal": UdyamDetector,
+    "esic": ESICDetector,
+    "gem": GeMDetector,
+    "cppp": CPPPDetector,
 }
+
+# Hiring detectors are instantiated with source_id (not default-constructible)
+_HIRING_SOURCES = ["naukri", "indeed_foundit", "glassdoor_india", "linkedin_indirect", "company_career_pages"]
+for _src in _HIRING_SOURCES:
+    DETECTOR_REGISTRY[_src] = GenericHiringDetector  # type: ignore[assignment]
 
 
 @dataclass
@@ -73,7 +132,10 @@ class DiffEngine:
             if detector_cls is None:
                 raise ValueError(f"No detector registered for source_id='{source_id}'")
 
-            detector = detector_cls()
+            try:
+                detector = detector_cls()
+            except TypeError:
+                detector = detector_cls(source_id)
             old_records = await self._load_old_records(source_id, last_state)
 
             async with self.db.acquire() as conn:
@@ -137,7 +199,20 @@ class DiffEngine:
     async def _load_old_records(
         self, source_id: str, last_state: Optional[dict]
     ) -> List[dict]:
-        append_only = {"nclt", "drt", "sarfaesi", "ecourts"}
+        append_only = {
+            "nclt", "drt", "sarfaesi", "ecourts",
+            # Phase 3 — all append-only (detect new records only)
+            "ibbi", "sebi_enforcement_orders", "sebi_bulk_block_deals",
+            "rbi_wilful_defaulter", "rbi_nbfc_bank_notifications",
+            "gst_portal", "epfo", "mca_charge_register", "roc_filings",
+            "high_court_commercial_division", "supreme_court_cause_lists",
+            "labour_court_orders", "cci_filings", "dgft", "rera",
+            "moef_environment_clearance_portal", "pollution_control_boards",
+            "cersai", "state_vat_commercial_tax_portals",
+            "udyam_registration_portal", "esic", "gem", "cppp",
+            "naukri", "indeed_foundit", "glassdoor_india",
+            "linkedin_indirect", "company_career_pages",
+        }
         if source_id in append_only:
             return []
 

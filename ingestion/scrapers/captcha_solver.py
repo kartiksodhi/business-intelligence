@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """OpenCV CAPTCHA solver for Indian government portals (securimage style).
 
 The e-Courts / NCLT portals use securimage — light gray text on white background,
@@ -28,10 +30,16 @@ import logging
 from collections import Counter
 from typing import Optional
 
-import cv2
-import numpy as np
-import pytesseract
-from PIL import Image
+try:
+    import cv2
+    import numpy as np
+    import pytesseract
+    from PIL import Image
+except ImportError:  # pragma: no cover - depends on local OCR toolchain
+    cv2 = None
+    np = None
+    pytesseract = None
+    Image = None
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +64,10 @@ def solve(
         min_length:      Minimum chars to accept a candidate.
         expected_length: Preferred candidate length for voting (6 for securimage).
     """
+    if not all((cv2, np, pytesseract, Image)):
+        logger.warning("captcha_solver: OCR dependencies unavailable; returning unsolved CAPTCHA")
+        return None
+
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:

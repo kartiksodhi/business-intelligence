@@ -77,3 +77,13 @@ The gap: nobody is watching all 35 Indian government sources continuously, detec
 - [ ] Domain name
 - [ ] Financial data source: CompData vs MCA scraping vs gradual build
 - [ ] Deployment: local now, VPS when needed
+
+---
+
+## Reference Resources
+
+### AI Studio Intelligence App
+- **Link**: [AI Studio (23fdf69a...)](https://aistudio.google.com/apps/23fdf69a-3598-4a92-802b-c58d1531b236)
+- **Status**: Live / Research Resource
+- **Documentation**: [docs/ai_studio_analysis.md](file:///Users/kartiksodhi/Desktop/Business%20Intelligence/docs/ai_studio_analysis.md)
+- **Role**: Provides real-time "Senior Analyst" logic and Google Search integration for corporate distress signals.

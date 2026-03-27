@@ -61,7 +61,7 @@ _captcha_solutions: dict[str, str] = {}
 
 def _db_error(e: Exception) -> HTTPException:
     logger.error("DB error:\n%s", traceback.format_exc())
-    return HTTPException(status_code=500, detail={"error": "Internal server error."})
+    return HTTPException(status_code=500, detail="Internal server error.")
 
 
 def _lag_hours(next_pull_at: Optional[datetime]) -> Optional[float]:
@@ -122,17 +122,17 @@ async def get_events_today(
     limit: int = Query(default=100, ge=1, le=500),
 ):
     # TODO Phase 2: insert auth check here
-    conditions = ["detected_at >= NOW() - INTERVAL '24 hours'"]
+    conditions = ["e.detected_at >= NOW() - INTERVAL '24 hours'"]
     args: list = []
     idx = 1
 
     if severity:
-        conditions.append(f"severity = ${idx}")
+        conditions.append(f"e.severity = ${idx}")
         args.append(severity)
         idx += 1
 
     if source:
-        conditions.append(f"source = ${idx}")
+        conditions.append(f"e.source = ${idx}")
         args.append(source)
         idx += 1
 
@@ -143,18 +143,20 @@ async def get_events_today(
         rows = await db.fetch(
             f"""
             SELECT
-                id,
-                cin,
-                source,
-                event_type,
-                severity,
-                detected_at,
-                health_score_before,
-                health_score_after,
-                LEFT(data_json::text, 200) AS data_json_summary
-            FROM events
+                e.id,
+                e.cin,
+                me.company_name,
+                e.source,
+                e.event_type,
+                e.severity,
+                e.detected_at,
+                e.health_score_before,
+                e.health_score_after,
+                LEFT(e.data_json::text, 200) AS data_json_summary
+            FROM events e
+            LEFT JOIN master_entities me ON e.cin = me.cin
             WHERE {where_clause}
-            ORDER BY detected_at DESC
+            ORDER BY e.detected_at DESC
             LIMIT ${idx}
             """,
             *args,
@@ -166,6 +168,7 @@ async def get_events_today(
         EventItem(
             id=row["id"],
             cin=row["cin"],
+            company_name=row["company_name"],
             source=row["source"],
             event_type=row["event_type"],
             severity=row["severity"],
@@ -646,12 +649,13 @@ async def create_subscriber_watchlist(
         if existing is None:
             existing = await db.fetchrow(
                 """
-                INSERT INTO watchlists (subscriber_id, cin, added_at, is_active)
-                VALUES ($1, $2, NOW(), FALSE)
+                INSERT INTO watchlists (subscriber_id, cin, name, added_at, is_active)
+                VALUES ($1, $2, $3, NOW(), TRUE)
                 RETURNING cin, added_at
                 """,
                 subscriber_id,
                 body.cin,
+                company["company_name"],
             )
     except HTTPException:
         raise
@@ -683,6 +687,58 @@ async def delete_subscriber_watchlist(
         )
     except Exception as e:
         raise _db_error(e)
+
+
+@router.get("/alerts/feed")
+async def get_alerts_feed(
+    db: Annotated[asyncpg.Connection, Depends(get_db)],
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """Return recent delivered alerts with company name and event context."""
+    try:
+        rows = await db.fetch(
+            """
+            SELECT
+                da.id,
+                da.cin,
+                me.company_name,
+                da.event_type AS signal_type,
+                COALESCE(e.severity, 'INFO') AS severity,
+                e.health_score_before,
+                e.health_score_after,
+                da.delivered_at,
+                COALESCE(LEFT(e.data_json::text, 300), '') AS explanation
+            FROM delivered_alerts da
+            LEFT JOIN master_entities me ON da.cin = me.cin
+            LEFT JOIN LATERAL (
+                SELECT severity, health_score_before, health_score_after, data_json
+                FROM events
+                WHERE cin = da.cin AND event_type = da.event_type
+                ORDER BY detected_at DESC
+                LIMIT 1
+            ) e ON TRUE
+            ORDER BY da.delivered_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    except Exception as e:
+        raise _db_error(e)
+
+    return [
+        {
+            "id": row["id"],
+            "cin": row["cin"],
+            "company_name": row["company_name"] or "Unknown Entity",
+            "signal_type": row["signal_type"],
+            "severity": row["severity"],
+            "health_score_before": row["health_score_before"] or 0,
+            "health_score_after": row["health_score_after"] or 0,
+            "delivered_at": row["delivered_at"].isoformat() if row["delivered_at"] else None,
+            "explanation": row["explanation"],
+        }
+        for row in rows
+    ]
 
 
 @router.get("/company/{cin}/events", response_model=list[CompanyEventResponseItem])
@@ -928,6 +984,193 @@ async def trigger_recalibrate(db: Annotated[asyncpg.Connection, Depends(get_db)]
         status="started",
         message="Recalibration job queued. Results in daily digest.",
     )
+
+
+@router.get("/companies/search")
+async def search_companies(
+    q: str = Query(..., min_length=1, description="Search query"),
+    limit: int = Query(default=10, ge=1, le=50),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    q = q.strip()
+    if not q:
+        return []
+    try:
+        # Starts-with matches first, then contains matches
+        rows = await db.fetch(
+            """
+            (
+                SELECT cin, company_name, registered_state, status, health_score, health_band,
+                       1 AS rank
+                FROM master_entities
+                WHERE company_name ILIKE $1
+                ORDER BY company_name
+                LIMIT $2
+            )
+            UNION ALL
+            (
+                SELECT cin, company_name, registered_state, status, health_score, health_band,
+                       2 AS rank
+                FROM master_entities
+                WHERE company_name ILIKE $3
+                  AND company_name NOT ILIKE $1
+                ORDER BY company_name
+                LIMIT $2
+            )
+            ORDER BY rank, company_name
+            LIMIT $2
+            """,
+            f"{q}%",
+            limit,
+            f"%{q}%",
+        )
+    except Exception as e:
+        raise _db_error(e)
+    return [
+        {
+            "cin": r["cin"],
+            "company_name": r["company_name"],
+            "registered_state": r["registered_state"],
+            "status": r["status"],
+            "health_score": r["health_score"],
+            "health_band": r["health_band"],
+        }
+        for r in rows
+    ]
+
+
+@router.get("/companies/{cin}/profile")
+async def get_company_profile(
+    cin: str,
+    db: asyncpg.Connection = Depends(get_db),
+):
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT cin, company_name, status, registered_state,
+                   industrial_class, date_of_incorporation, date_of_last_agm,
+                   authorized_capital, paid_up_capital,
+                   company_category, company_subcategory, registered_address,
+                   health_score, health_band
+            FROM master_entities
+            WHERE cin = $1
+            """,
+            cin,
+        )
+    except Exception as e:
+        raise _db_error(e)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"CIN {cin} not found.")
+    return dict(row)
+
+
+@router.get("/companies/{cin}/intelligence")
+async def get_company_intelligence(
+    cin: str,
+    db: asyncpg.Connection = Depends(get_db),
+):
+    """
+    Generate full AI intelligence report for a company.
+    Combines our verified DB signals with Gemini + Google Search grounding.
+    """
+    from api.gemini_intelligence import generate_company_intelligence
+
+    # Get company info from DB
+    company = await db.fetchrow(
+        "SELECT cin, company_name, health_score, health_band FROM master_entities WHERE cin = $1",
+        cin,
+    )
+    if company is None:
+        raise HTTPException(status_code=404, detail=f"CIN {cin} not found.")
+
+    # Get our verified events for this company
+    events = await db.fetch(
+        """
+        SELECT event_type, severity, source, detected_at, data_json
+        FROM events WHERE cin = $1
+        ORDER BY detected_at DESC LIMIT 10
+        """,
+        cin,
+    )
+    db_events = []
+    for e in events:
+        db_events.append({
+            "event_type": e["event_type"],
+            "severity": e["severity"],
+            "source": e["source"],
+            "detected_at": str(e["detected_at"]),
+            "data_json": e["data_json"] if isinstance(e["data_json"], dict) else {},
+        })
+
+    try:
+        result = await generate_company_intelligence(
+            company_name=company["company_name"],
+            cin=cin,
+            db_events=db_events if db_events else None,
+            db_health_score=company["health_score"],
+        )
+        return result
+    except Exception as exc:
+        logger.error("Intelligence generation failed for %s: %s", cin, exc)
+        raise HTTPException(status_code=502, detail=f"Gemini API error: {str(exc)}")
+
+
+@router.get("/intelligence/search")
+async def search_company_intelligence(
+    q: str = Query(..., min_length=2, description="Company name to analyze"),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    """
+    Search by company name and generate intelligence.
+    If company is in our DB, enriches with verified signals.
+    If not, generates pure Gemini intelligence from web search.
+    """
+    from api.gemini_intelligence import generate_company_intelligence
+
+    # Try to find in our DB first
+    row = await db.fetchrow(
+        """
+        SELECT cin, company_name, health_score
+        FROM master_entities
+        WHERE company_name ILIKE $1 OR normalized_name ILIKE $2
+        LIMIT 1
+        """,
+        f"%{q}%",
+        f"%{q.lower()}%",
+    )
+
+    cin = row["cin"] if row else None
+    company_name = row["company_name"] if row else q
+    health_score = row["health_score"] if row else None
+
+    db_events = []
+    if cin:
+        events = await db.fetch(
+            "SELECT event_type, severity, source, detected_at, data_json FROM events WHERE cin = $1 ORDER BY detected_at DESC LIMIT 10",
+            cin,
+        )
+        for e in events:
+            db_events.append({
+                "event_type": e["event_type"],
+                "severity": e["severity"],
+                "source": e["source"],
+                "detected_at": str(e["detected_at"]),
+                "data_json": e["data_json"] if isinstance(e["data_json"], dict) else {},
+            })
+
+    try:
+        result = await generate_company_intelligence(
+            company_name=company_name,
+            cin=cin,
+            db_events=db_events if db_events else None,
+            db_health_score=health_score,
+        )
+        result["_fromDatabase"] = cin is not None
+        result["_dbCin"] = cin
+        return result
+    except Exception as exc:
+        logger.error("Intelligence search failed for %s: %s", q, exc)
+        raise HTTPException(status_code=502, detail=f"Gemini API error: {str(exc)}")
 
 
 @router.post("/captcha/solve", response_model=CaptchaSolveResponse)

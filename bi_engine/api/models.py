@@ -25,6 +25,7 @@ class SourceStatusItem(BaseModel):
 class EventItem(BaseModel):
     id: int
     cin: Optional[str]
+    company_name: Optional[str] = None
     source: str
     event_type: str
     severity: str

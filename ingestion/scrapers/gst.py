@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 import time
 from typing import Optional
 
@@ -24,6 +26,8 @@ class GSTScraper(BaseSignalScraper):
     async def run(self) -> list[dict]:
         monitored = self._load_monitored_gstins()
         if not monitored:
+            logger.info("gst: no monitored GSTINs discovered")
+            self._store_state(self.source_id, {"gstins_checked": 0, "emitted_events": 0}, record_count=0)
             return []
 
         emitted: list[dict] = []
@@ -52,20 +56,36 @@ class GSTScraper(BaseSignalScraper):
                 self._insert_event(cin, event_type, severity, event_payload)
                 emitted.append(event_payload)
 
-            time.sleep(2)  # polite delay between GSTINs
+            await asyncio.sleep(2)
 
+        self._store_state(
+            self.source_id,
+            {"gstins_checked": len(monitored), "emitted_events": len(emitted)},
+            record_count=len(monitored),
+        )
         return emitted
 
     def _load_monitored_gstins(self) -> list[tuple[str, str]]:
         try:
-            rows = self._fetchall(
-                """
-                SELECT cin, gstin
-                FROM master_entities
-                WHERE gstin IS NOT NULL
-                  AND status = 'Active'
-                """,
-            )
+            if self._table_has_column("master_entities", "gstin"):
+                rows = self._fetchall(
+                    """
+                    SELECT cin, gstin
+                    FROM master_entities
+                    WHERE gstin IS NOT NULL
+                      AND status = 'Active'
+                    """,
+                )
+            else:
+                rows = self._fetchall(
+                    """
+                    SELECT im.cin, im.identifier_value AS gstin
+                    FROM identifier_map im
+                    JOIN master_entities me ON me.cin = im.cin
+                    WHERE im.identifier_type = 'GSTIN'
+                      AND me.status = 'Active'
+                    """,
+                )
         except Exception as exc:
             logger.warning("gst: unable to load monitored GSTINs: %s", exc)
             return []
@@ -78,7 +98,195 @@ class GSTScraper(BaseSignalScraper):
                 cin, gstin = row[0], row[1]
             if cin and gstin:
                 monitored.append((cin, gstin))
-        return monitored
+        if monitored:
+            return monitored
+        return self._bootstrap_gstins_from_pan()
+
+    def _bootstrap_gstins_from_pan(self) -> list[tuple[str, str]]:
+        try:
+            rows = self._fetchall(
+                """
+                SELECT cin, pan, registered_state
+                FROM master_entities
+                WHERE pan IS NOT NULL
+                  AND status = 'Active'
+                LIMIT 100
+                """
+            )
+        except Exception as exc:
+            logger.warning("gst: unable to bootstrap GSTINs from PAN: %s", exc)
+            return []
+
+        discovered: list[tuple[str, str]] = []
+        for row in rows:
+            if isinstance(row, dict):
+                cin = row.get("cin")
+                pan = row.get("pan")
+                registered_state = row.get("registered_state")
+            else:
+                cin, pan, registered_state = row[0], row[1], row[2]
+            if not cin or not pan:
+                continue
+
+            for gstin in self._candidate_gstins(pan, registered_state):
+                payload = self._fetch_taxpayer_payload(gstin)
+                details = self._normalise_taxpayer_payload(gstin, payload) if payload else None
+                if not details or not details.get("gstin_status") or not details.get("trade_name"):
+                    continue
+                discovered.append((cin, gstin))
+                self._store_discovered_gstin(cin, gstin)
+                logger.info("gst: bootstrapped gstin=%s for cin=%s", gstin, cin)
+                break
+            time.sleep(1)
+        return discovered
+
+    def _candidate_gstins(self, pan: str, registered_state: Optional[str]) -> list[str]:
+        pan = (pan or "").strip().upper()
+        if not re.fullmatch(r"[A-Z]{5}\d{4}[A-Z]", pan):
+            return []
+        state_codes = self._prioritised_state_codes(registered_state)
+        gstins: list[str] = []
+        for state_code in state_codes:
+            prefix = f"{state_code}{pan}1Z"
+            gstins.append(prefix + self._gst_checksum(prefix))
+        return gstins
+
+    def _prioritised_state_codes(self, registered_state: Optional[str]) -> list[str]:
+        all_codes = [
+            "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14",
+            "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28",
+            "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "97",
+        ]
+        state_map = {
+            "andaman and nicobar islands": "35",
+            "andhra pradesh": "37",
+            "arunachal pradesh": "12",
+            "assam": "18",
+            "bihar": "10",
+            "chandigarh": "04",
+            "chhattisgarh": "22",
+            "dadra and nagar haveli and daman and diu": "26",
+            "delhi": "07",
+            "goa": "30",
+            "gujarat": "24",
+            "haryana": "06",
+            "himachal pradesh": "02",
+            "jammu and kashmir": "01",
+            "jharkhand": "20",
+            "karnataka": "29",
+            "kerala": "32",
+            "ladakh": "38",
+            "lakshadweep": "31",
+            "madhya pradesh": "23",
+            "maharashtra": "27",
+            "manipur": "14",
+            "meghalaya": "17",
+            "mizoram": "15",
+            "nagaland": "13",
+            "odisha": "21",
+            "orissa": "21",
+            "other territory": "97",
+            "puducherry": "34",
+            "punjab": "03",
+            "rajasthan": "08",
+            "sikkim": "11",
+            "tamil nadu": "33",
+            "telangana": "36",
+            "tripura": "16",
+            "uttar pradesh": "09",
+            "uttarakhand": "05",
+            "west bengal": "19",
+            "an": "35",
+            "ap": "37",
+            "ar": "12",
+            "as": "18",
+            "br": "10",
+            "cg": "22",
+            "ch": "04",
+            "dd": "26",
+            "dl": "07",
+            "ga": "30",
+            "gj": "24",
+            "hr": "06",
+            "hp": "02",
+            "jk": "01",
+            "jh": "20",
+            "ka": "29",
+            "kl": "32",
+            "la": "38",
+            "ld": "31",
+            "mh": "27",
+            "ml": "17",
+            "mn": "14",
+            "mp": "23",
+            "mz": "15",
+            "nl": "13",
+            "od": "21",
+            "or": "21",
+            "pb": "03",
+            "py": "34",
+            "rj": "08",
+            "sk": "11",
+            "tn": "33",
+            "tr": "16",
+            "ts": "36",
+            "uk": "05",
+            "up": "09",
+            "wb": "19",
+        }
+        preferred = None
+        if registered_state:
+            cleaned = registered_state.strip().lower()
+            if cleaned.isdigit() and len(cleaned) <= 2:
+                preferred = cleaned.zfill(2)
+            else:
+                preferred = state_map.get(cleaned)
+        if preferred and preferred in all_codes:
+            return [preferred] + [code for code in all_codes if code != preferred]
+        return all_codes
+
+    def _gst_checksum(self, body: str) -> str:
+        charset = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        factor = 2
+        total = 0
+        for char in reversed(body):
+            code_point = charset.index(char)
+            digit = factor * code_point
+            total += (digit // 36) + (digit % 36)
+            factor = 1 if factor == 2 else 2
+        remainder = total % 36
+        return charset[(36 - remainder) % 36]
+
+    def _store_discovered_gstin(self, cin: str, gstin: str) -> None:
+        try:
+            if self._table_has_column("master_entities", "gstin"):
+                self._execute(
+                    """
+                    UPDATE master_entities
+                    SET gstin = %s
+                    WHERE cin = %s
+                      AND (gstin IS NULL OR gstin = '')
+                    """,
+                    (gstin, cin),
+                )
+            else:
+                self._execute(
+                    """
+                    INSERT INTO identifier_map (cin, identifier_type, identifier_value, source, confidence, created_at)
+                    SELECT %s, 'GSTIN', %s, %s, %s, NOW()
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM identifier_map
+                        WHERE cin = %s
+                          AND identifier_type = 'GSTIN'
+                          AND identifier_value = %s
+                    )
+                    """,
+                    (cin, gstin, self.source_id, 0.80, cin, gstin),
+                )
+            self._commit()
+        except Exception as exc:
+            logger.warning("gst: failed to persist discovered GSTIN for cin=%s: %s", cin, exc)
 
     def _fetch_taxpayer_payload(self, gstin: str) -> Optional[dict]:
         """Session-cookie pattern (shubham-dube/GST-Verification-API):

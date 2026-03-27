@@ -1,5 +1,9 @@
 from datetime import date
+from unittest.mock import AsyncMock
 
+import pytest
+
+import ingestion.scrapers.drt as drt_module
 from ingestion.scrapers.drt import DRTScraper
 from ingestion.scrapers import _run_counter
 
@@ -39,3 +43,16 @@ def test_drt_bench_rotation():
     second = s._benches_for_this_run()
     assert first != second
 
+
+@pytest.mark.asyncio
+async def test_drt_returns_empty_when_all_search_terms_fail():
+    s = DRTScraper(make_db())
+    s._benches_for_this_run = lambda: ["Bench A", "Bench B"]
+    s._ensure_live_route = AsyncMock()
+    s._fetch_schemes = lambda: [
+        {"schemeNameDrtId": "1", "SchemaName": "Bench A"},
+        {"schemeNameDrtId": "2", "SchemaName": "Bench B"},
+    ]
+    s._search_party_name = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("public search unsupported"))
+
+    assert await s.fetch_new_cases(date(2024, 1, 1)) == []
