@@ -1,4 +1,5 @@
 bi_engine/.env
+OPENCLAW_ACCESS/
 .DS_Store
 **/.DS_Store
 __pycache__/
