@@ -123,3 +123,25 @@ Detects macro-economic sector collapse before it hits the news.
 - **Formula:** Sector Stress Index = Σ(Score_baseline - Score_current) / N_cluster
   Applied across all companies sharing same NIC code and State.
 - **Execution:** If 5+ companies in same state/sector cross into AMBER/RED within 30-day rolling window — fire SECTOR_CLUSTER_ALERT to all relevant watchlists immediately.
+
+---
+
+## PART 4: Product unbundling thesis
+
+ICIE (full platform) is hard to sell and hard to explain. Unbundle into vertical products per buyer. Each is a standalone product with its own buyer. All use ICIE as backend.
+
+| Product | Buyer | Sales motion |
+|---|---|---|
+| Director Contagion Tracker | NBFCs, banks | 20-min sales call, immediate value |
+| Builder Creditworthiness Score | Construction finance NBFCs | RERA data → credit risk |
+| Court Judgment Intelligence | Lenders, PE, advocates | eCourts + NCLT feed |
+| GeM Procurement Pattern Engine | MSMEs, PE sector research | Tender wins + vendor patterns |
+
+### Additional unbundled data plays
+- **GeM portal** → procurement winners, contract values, vendor patterns → buyers: PE, banks, MSMEs
+- **NDAP (NITI Aayog)** → national datasets across all sectors → free download, no scraping
+- **Parliamentary debates** → policy shift detection → buyers: hedge funds, corporates
+- **MCA charge registry** → bank exposure per company → lenders would pay
+- **RBI enforcement actions** → NBFC/bank flags → compliance teams
+- **CPPP** → infra tenders, L1 margins, contractor patterns → construction finance
+- **RERA** → builder risk → NBFCs, homebuyers, RE funds

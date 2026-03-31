@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
 from api.dependencies import get_db
+from features import all_flags
 from api.models import (
     AccuracyResponse,
     CaptchaSolveRequest,
@@ -1420,6 +1421,37 @@ async def get_scraper_health(db: Annotated[asyncpg.Connection, Depends(get_db)])
         alerts_delivered_today=alerts_today or 0,
         scrapers=scrapers,
     )
+
+
+@router.get("/flags")
+async def get_feature_flags():
+    """Return all feature flags and their current state."""
+    return {"flags": all_flags()}
+
+
+@router.post("/run/{phase}")
+async def run_pipeline_phase(phase: str):
+    """
+    Manually trigger a pipeline phase.
+
+    Valid phases: ingest, detect, route, digest, recalibrate
+    This endpoint signals the scheduler to run the phase immediately.
+    The scheduler must be running for this to take effect.
+    """
+    valid_phases = {"ingest", "detect", "route", "digest", "recalibrate"}
+    if phase not in valid_phases:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown phase '{phase}'. Valid: {sorted(valid_phases)}",
+        )
+    # Write a trigger file the scheduler polls for
+    trigger_path = f"/tmp/icie_trigger_{phase}"
+    try:
+        with open(trigger_path, "w") as f:
+            f.write(datetime.now(timezone.utc).isoformat())
+        return {"triggered": phase, "trigger_file": trigger_path}
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/dashboard", response_class=HTMLResponse)

@@ -288,3 +288,38 @@ Backup plan:
 5. Alternative APIs: Signzy, Karza, Gridlines
 
 Goal: self-sufficient on core fields (directors, basic financials, charges) by Phase 4.
+
+---
+
+## RERA module
+
+**What it is:** Real Estate Regulation Act 2016. Every project must register publicly. Data: builder details, timelines, complaints, escrow compliance, agent registry. Nobody has built clean intelligence on this yet.
+
+- **Source URL:** https://rera.gov.in (unified national portal, all states)
+- **Cadence:** Weekly
+- **Events:** New project registration. Complaint filed. Escrow non-compliance. Project delay flagged. Agent delisted.
+
+### State portal build priority
+```
+Tier 1 (build first): MahaRERA, UP-RERA, K-RERA, Gujarat-RERA, Haryana-RERA
+Tier 2 (build second): Delhi, Rajasthan, Tamil Nadu, Telangana, MP
+Tier 3 (low priority): Odisha, Punjab, Bihar, Jharkhand
+Skip: NE states (portals non-functional)
+```
+
+### RERA scraper repos
+- `praneethsattavaram/WebScraping_RERA_Website` — Selenium, HP-RERA, adaptable to other states
+- `getmaxun/maxun` — fallback for JS-heavy state portals
+
+### RERA entity resolution pipeline
+```
+RERA builder name → resolve CIN via MCA21 entity_resolver
+→ director list → existing stress scoring
+→ charge registry → bank encumbrances
+→ eCourts litigation → openjustice-in/ecourts
+```
+
+### RERA monetisation plays
+- Play 1: Builder creditworthiness score → NBFCs/banks → ₹30–50k/month API
+- Play 2: Homebuyer due diligence report → consumers → ₹499/report freemium
+- Play 3: Real estate fund research feed → PE/family offices → ₹2–5L/year

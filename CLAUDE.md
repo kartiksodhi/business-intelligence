@@ -68,6 +68,13 @@ Every data fragment resolves to a CIN before entering the graph. Unresolved = qu
 5. **No repeated reads.** If a file was read earlier in the session, use that result. Do not re-read it.
 6. **Answer from context first.** If CLAUDE.md or memory already answers the question, do not open any file.
 
+## Decisions made — do not revisit
+- **listmonk**: skip until paying users exist. Use Telegram alerts for now.
+- **GST filing data**: NOT public. Only GSTIN status is. Skip.
+- **ICIE as platform**: hard sell. Unbundle into vertical products per buyer. See INTELLIGENCE.md Part 4.
+- **EPFO/DRT/SARFAESI**: no open-source repos exist. Custom build required.
+- **Firecrawl**: not installed. Playwright first, always. Only install Firecrawl with operator approval.
+
 ## Mistakes → rules (Boris Cherny pattern)
 Every time Claude does something wrong in ICIE, add it as a rule to CLAUDE.md immediately. Do not wait. Do not batch. This compounds — the longer we build, the smarter the agent gets.
 

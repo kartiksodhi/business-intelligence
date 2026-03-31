@@ -149,3 +149,24 @@ Contagion: Director DIN 07654321 also sits on 2 other boards
 ```
 
 AI summary generated only at this point. One Claude API call per alert delivery. Not pre-generated.
+
+---
+
+## External repos to integrate
+
+### Drop in immediately
+- `openjustice-in/ecourts` — all High Courts, CAPTCHA handled, replaces custom eCourts scraper
+- `vanga/indian-supreme-court-judgments` — bulk JSON/Parquet, AWS hosted, CC-BY-4.0, no scraping needed
+- `96mohitm/court-data-scraper` — NCLT + district courts
+- `PraneethKarnena/mca-web-scraping` — CIN-based MCA fetch reference
+- `jugaad-data` — NSE + RBI, best maintained India market lib
+- `sdabhi23/bsedata` — BSE real-time, MIT licensed
+
+### Infrastructure
+- `langchain-ai/langgraph` — stateful agent orchestration, maps to ICIE pipeline phases
+- `n8n-io/n8n` — wire Telegram + email + scraper triggers, self-host on VPS
+- `appsmithorg/appsmith` — ICIE dashboard, zero frontend code (Gemini builds against this)
+- `getmaxun/maxun` — no-code scraper for JS-heavy/blocked portals (fallback before Firecrawl)
+
+### RERA-specific
+- `praneethsattavaram/WebScraping_RERA_Website` — Selenium, HP-RERA, adaptable to other states
