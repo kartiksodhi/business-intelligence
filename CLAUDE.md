@@ -56,7 +56,7 @@ Every data fragment resolves to a CIN before entering the graph. Unresolved = qu
 4. **Telegram bot** — CRITICAL severity only. Immediate push. Free.
 
 ## Spec files — read only when directly needed
-`PIPELINE.md` · `SKILLS.md` · `SOURCES.md` · `MEMORY.md` · `INTELLIGENCE.md` · `COMPLIANCE.md` · `REGULATIONS.md` · `SECURITY.md`
+`PIPELINE.md` · `SKILLS.md` · `SOURCES.md` · `MEMORY.md` · `INTELLIGENCE.md` · `COMPLIANCE.md` · `REGULATIONS.md` · `SECURITY.md` · `MODELS.md`
 
 **Do NOT read any spec file proactively.** Only read a file if the current task explicitly requires data from it. If CLAUDE.md context is sufficient, stop there.
 
@@ -67,6 +67,12 @@ Every data fragment resolves to a CIN before entering the graph. Unresolved = qu
 4. **No broad exploration.** If a prompt says "fix everything" or "investigate", ask which specific thing to fix first.
 5. **No repeated reads.** If a file was read earlier in the session, use that result. Do not re-read it.
 6. **Answer from context first.** If CLAUDE.md or memory already answers the question, do not open any file.
+
+## Mistakes → rules (Boris Cherny pattern)
+Every time Claude does something wrong in ICIE, add it as a rule to CLAUDE.md immediately. Do not wait. Do not batch. This compounds — the longer we build, the smarter the agent gets.
+
+## Parallel sessions pattern
+Run 10–15 concurrent Claude Code sessions across pipeline phases simultaneously. One session per major domain: MCA scraper, eCourts scraper, entity resolution, scoring, routing, RERA, dashboard. Each owns its domain fully. Separate terminal tabs, not worktrees — fully independent cognition per phase.
 
 ## When uncertain
 Claude Code states uncertainty and asks. Never guesses on architecture. Never proceeds without a spec.
