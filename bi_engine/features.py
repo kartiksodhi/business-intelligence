@@ -21,6 +21,10 @@ _FLAGS: dict[str, bool] = {
     "LANGGRAPH": os.getenv("FEATURE_LANGGRAPH", "false").lower() == "true",
     "GEM_MODULE": os.getenv("FEATURE_GEM", "false").lower() == "true",
     "BSE_MODULE": os.getenv("FEATURE_BSE", "false").lower() == "true",
+    # Quant fund module — set FEATURE_QUANT=true to enable
+    "QUANT_MODULE": os.getenv("FEATURE_QUANT", "false").lower() == "true",
+    # Live trading — set FEATURE_QUANT_LIVE=true only after paper trading is validated
+    "QUANT_LIVE": os.getenv("FEATURE_QUANT_LIVE", "false").lower() == "true",
 }
 
 

@@ -15,6 +15,7 @@ import asyncpg
 from fastapi import FastAPI
 
 from api.routers.operator import router as operator_router
+from features import feature
 
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,12 @@ async def lifespan(app: FastAPI):
         command_timeout=30,
     )
     await ensure_operator_tables(app.state.pool)
+
+    if feature("QUANT_MODULE"):
+        from quant.migrations import run_quant_migrations
+        await run_quant_migrations(app.state.pool)
+        logger.info("Quant tables ensured.")
+
     logger.info("Connection pool created.")
 
     yield
@@ -149,3 +156,7 @@ app = FastAPI(
 )
 
 app.include_router(operator_router)
+
+if feature("QUANT_MODULE"):
+    from api.routers.quant import router as quant_router
+    app.include_router(quant_router)

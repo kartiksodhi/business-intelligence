@@ -13,6 +13,7 @@ from routing.migrations import ensure_alerts_retry_column
 from routing.summarizer import AlertSummarizer
 from routing.telegram_deliverer import TelegramDeliverer
 from routing.watchlist_matcher import WatchlistMatcher
+from features import feature
 
 
 def create_scheduler(
@@ -38,6 +39,10 @@ def create_scheduler(
         replace_existing=True,
         misfire_grace_time=300,
     )
+    if feature("QUANT_MODULE"):
+        from quant.quant_scheduler import add_quant_jobs
+        add_quant_jobs(scheduler, pool)
+
     return scheduler
 
 
